@@ -8,13 +8,10 @@ import { NoAssemblyRegion } from '@jbrowse/core/util/types'
 import { openLocation } from '@jbrowse/core/util/io'
 import { ObservableCreate } from '@jbrowse/core/util/rxjs'
 import SimpleFeature, { Feature } from '@jbrowse/core/util/simpleFeature'
-import { TabixIndexedFile } from '@gmod/tabix'
-import gff from '@gmod/gff'
-import { Observer } from 'rxjs'
 
-import { Instance } from 'mobx-state-tree'
+import { Observer } from 'rxjs'
 import { readConfObject } from '@jbrowse/core/configuration'
-import MyConfigSchema from './configSchema'
+import { AnyConfigurationModel } from '@jbrowse/core/configuration/configurationSchema'
 
 type Strand = '+' | '-' | '.' | '?'
 interface FeatureLoc {
@@ -37,38 +34,56 @@ interface LineFeature {
 }
 
 export default class extends BaseFeatureDataAdapter {
-  protected gff: TabixIndexedFile
-
   protected dontRedispatch: string[]
 
-  public constructor(config: Instance<typeof MyConfigSchema>) {
-    super(config)
-    const gffGzLocation = readConfObject(config, 'gffGzLocation')
-    const indexType = readConfObject(config, ['index', 'indexType'])
-    const location = readConfObject(config, ['index', 'location'])
-    const dontRedispatch = readConfObject(config, 'dontRedispatch')
+  protected config: any
 
+  protected cachedSetup: any
+
+  public constructor(config: AnyConfigurationModel) {
+    super(config)
+    this.config = config
+
+    const dontRedispatch = readConfObject(this.config, 'dontRedispatch')
     this.dontRedispatch = dontRedispatch || ['chromosome', 'contig', 'region']
-    this.gff = new TabixIndexedFile({
-      filehandle: openLocation(gffGzLocation),
-      csiFilehandle: indexType === 'CSI' ? openLocation(location) : undefined,
-      tbiFilehandle: indexType !== 'CSI' ? openLocation(location) : undefined,
-      chunkCacheSize: 50 * 2 ** 20,
-      renameRefSeqs: (n: string) => n,
-    })
+  }
+
+  public async configure() {
+    if (!this.cachedSetup) {
+      this.cachedSetup = await import('@gmod/tabix').then(
+        ({ TabixIndexedFile }) => {
+          const gffGzLocation = readConfObject(this.config, 'gffGzLocation')
+          const indexType = readConfObject(this.config, ['index', 'indexType'])
+          const location = readConfObject(this.config, ['index', 'location'])
+
+          const usingCSI = indexType === 'CSI'
+          return new TabixIndexedFile({
+            filehandle: openLocation(gffGzLocation),
+            csiFilehandle: usingCSI ? openLocation(location) : undefined,
+            tbiFilehandle: usingCSI ? openLocation(location) : undefined,
+            chunkCacheSize: 50 * 2 ** 20,
+            renameRefSeqs: (n: string) => n,
+          })
+        },
+      )
+    }
+    return this.cachedSetup
   }
 
   public async getRefNames(opts: BaseOptions = {}) {
-    return this.gff.getReferenceSequenceNames(opts)
+    const file = await this.configure()
+    return file.getReferenceSequenceNames(opts)
   }
 
   public async getHeader() {
-    return this.gff.getHeader()
+    const file = await this.configure()
+    return file.getHeader()
   }
 
   public getFeatures(query: NoAssemblyRegion, opts: BaseOptions = {}) {
     return ObservableCreate<Feature>(async observer => {
-      const metadata = await this.gff.getMetadata()
+      const file = await this.configure()
+      const metadata = await file.getMetadata()
       this.getFeaturesHelper(query, opts, metadata, observer, true)
     }, opts.signal)
   }
@@ -83,8 +98,10 @@ export default class extends BaseFeatureDataAdapter {
   ) {
     try {
       const lines: LineFeature[] = []
+      const file = await this.configure()
+      const GFFParser = await import('@gmod/gff')
 
-      await this.gff.getLines(
+      await file.getLines(
         query.refName,
         query.start,
         query.end,
@@ -140,7 +157,7 @@ export default class extends BaseFeatureDataAdapter {
         })
         .join('\n')
 
-      const features = gff.parseStringSync(gff3, {
+      const features = GFFParser.parseStringSync(gff3, {
         parseFeatures: true,
         parseComments: false,
         parseDirectives: false,
