@@ -1,6 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { BigBed } from '@gmod/bbi'
-import BED from '@gmod/bed'
 import {
   BaseFeatureDataAdapter,
   BaseOptions,
@@ -11,8 +9,7 @@ import { ObservableCreate } from '@jbrowse/core/util/rxjs'
 import SimpleFeature, { Feature } from '@jbrowse/core/util/simpleFeature'
 import { map, mergeAll } from 'rxjs/operators'
 import { readConfObject } from '@jbrowse/core/configuration'
-import { Instance } from 'mobx-state-tree'
-import configSchema from './configSchema'
+import { AnyConfigurationModel } from '@jbrowse/core/configuration/configurationSchema'
 import { ucscProcessedTranscript } from '../util'
 
 interface BEDFeature {
@@ -27,31 +24,44 @@ interface Parser {
 }
 
 export default class BigBedAdapter extends BaseFeatureDataAdapter {
-  private bigbed: BigBed
+  public cachedSetup: any
 
-  private parser: Promise<Parser>
+  protected config: any
 
-  public constructor(config: Instance<typeof configSchema>) {
+  public constructor(config: AnyConfigurationModel) {
     super(config)
-    const bigBedLocation = readConfObject(
-      config,
-      'bigBedLocation',
-    ) as FileLocation
-    this.bigbed = new BigBed({
-      filehandle: openLocation(bigBedLocation),
-    })
+    this.config = config
+  }
 
-    this.parser = this.bigbed
-      .getHeader()
-      .then(({ autoSql }: { autoSql: string }) => new BED({ autoSql }))
+  protected async setup() {
+    if (!this.cachedSetup) {
+      this.cachedSetup = await Promise.all([
+        import('@gmod/bed'),
+        import('@gmod/bbi'),
+      ]).then(async ([BED, { BigBed }]) => {
+        const bigBedLocation = readConfObject(
+          this.config,
+          'bigBedLocation',
+        ) as FileLocation
+        const bigbed = new BigBed({
+          filehandle: openLocation(bigBedLocation),
+        })
+        const { autoSql } = await bigbed.getHeader()
+        const parser = new BED.default({ autoSql })
+        return { bigbed, parser }
+      })
+    }
+    return this.cachedSetup
   }
 
   public async getRefNames() {
-    return Object.keys((await this.bigbed.getHeader()).refsByName)
+    const { bigbed } = await this.setup()
+    return Object.keys((await bigbed.getHeader()).refsByName)
   }
 
   async getHeader(opts?: BaseOptions) {
-    const { version, fileType } = await this.bigbed.getHeader(opts)
+    const { bigbed } = await this.setup()
+    const { version, fileType } = await bigbed.getHeader(opts)
     // @ts-ignore
     const { autoSql } = await this.parser
     const { fields, ...rest } = autoSql
@@ -63,7 +73,8 @@ export default class BigBedAdapter extends BaseFeatureDataAdapter {
   }
 
   public async refIdToName(refId: number) {
-    return ((await this.bigbed.getHeader()).refsByNumber[refId] || {}).name
+    const { bigbed } = await this.setup()
+    return ((await bigbed.getHeader()).refsByNumber[refId] || {}).name
   }
 
   public getFeatures(region: Region, opts: BaseOptions = {}) {
@@ -71,8 +82,8 @@ export default class BigBedAdapter extends BaseFeatureDataAdapter {
     const { signal } = opts
     return ObservableCreate<Feature>(async observer => {
       try {
-        const parser = await this.parser
-        const ob = await this.bigbed.getFeatureStream(refName, start, end, {
+        const { bigbed, parser } = await this.setup()
+        const ob = await bigbed.getFeatureStream(refName, start, end, {
           signal,
           basesPerSpan: end - start,
         })
