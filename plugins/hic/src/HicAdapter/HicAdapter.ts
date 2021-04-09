@@ -8,7 +8,6 @@ import { openLocation } from '@jbrowse/core/util/io'
 import { Instance } from 'mobx-state-tree'
 import { readConfObject } from '@jbrowse/core/configuration'
 import type { GenericFilehandle } from 'generic-filehandle'
-import HicStraw from 'hic-straw'
 import MyConfigSchema from './configSchema'
 
 interface ContactRecord {
@@ -55,33 +54,47 @@ export function openFilehandleWrapper(location: FileLocation) {
   return new GenericFilehandleWrapper(openLocation(location))
 }
 
+interface HicClass {
+  getContactRecords: (
+    normalize: string,
+    ref: Ref,
+    ref2: Ref,
+    units: string,
+    binsize: number,
+  ) => Promise<ContactRecord[]>
+  getMetaData: () => Promise<HicMetadata>
+}
 export default class HicAdapter extends BaseFeatureDataAdapter {
-  private hic: {
-    getContactRecords: (
-      normalize: string,
-      ref: Ref,
-      ref2: Ref,
-      units: string,
-      binsize: number,
-    ) => Promise<ContactRecord[]>
-    getMetaData: () => Promise<HicMetadata>
-  }
+  protected hicLocation: FileLocation
+
+  protected cached?: Promise<HicClass>
 
   public constructor(config: Instance<typeof MyConfigSchema>) {
     super(config)
-    const hicLocation = readConfObject(config, 'hicLocation')
-    this.hic = new HicStraw({
-      file: openFilehandleWrapper(hicLocation),
-    })
+    this.hicLocation = readConfObject(config, 'hicLocation')
+  }
+
+  async setup() {
+    if (!this.cached) {
+      this.cached = import('hic-straw').then(
+        HicStraw =>
+          new HicStraw({
+            file: openFilehandleWrapper(this.hicLocation),
+          }),
+      )
+    }
+    return this.cached
   }
 
   async getRefNames() {
-    const metadata = await this.hic.getMetaData()
+    const hic = await this.setup()
+    const metadata = await hic.getMetaData()
     return metadata.chromosomes.map(chr => chr.name)
   }
 
   async getResolution(bpPerPx: number) {
-    const metadata = await this.hic.getMetaData()
+    const hic = await this.setup()
+    const metadata = await hic.getMetaData()
     const { resolutions } = metadata
     let chosenResolution = resolutions[resolutions.length - 1]
 
@@ -100,13 +113,9 @@ export default class HicAdapter extends BaseFeatureDataAdapter {
       const { bpPerPx } = opts
       const res = await this.getResolution(bpPerPx || 1000)
 
-      const records = await this.hic.getContactRecords(
-        'KR',
-        { start, chr, end },
-        { start, chr, end },
-        'BP',
-        res,
-      )
+      const hic = await this.setup()
+      const reg = { start, chr, end }
+      const records = await hic.getContactRecords('KR', reg, reg, 'BP', res)
       records.forEach(record => {
         observer.next(record)
       })
