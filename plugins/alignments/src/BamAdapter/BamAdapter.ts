@@ -1,4 +1,3 @@
-import { BamFile } from '@gmod/bam'
 import {
   BaseFeatureDataAdapter,
   BaseOptions,
@@ -25,12 +24,17 @@ interface Header {
 }
 
 export default class BamAdapter extends BaseFeatureDataAdapter {
-  // @ts-ignore  -- the configure method assigns this essentially via the constructor
-  protected bam: BamFile
-
   protected sequenceAdapter?: BaseFeatureDataAdapter
 
   private samHeader: Header = {}
+
+  protected config: AnyConfigurationModel
+
+  protected getSubAdapter: any
+
+  protected cache: any
+
+  protected setupCache: any
 
   public constructor(
     config: AnyConfigurationModel,
@@ -38,46 +42,53 @@ export default class BamAdapter extends BaseFeatureDataAdapter {
   ) {
     super(config)
 
-    // note that derived classes may not provide a BAM directly
-    // so this is conditional
-    this.configure(config, getSubAdapter)
+    this.config = config
+    this.getSubAdapter = getSubAdapter
   }
 
   // derived classes may not use the same configuration so a custom
   // configure method allows derived classes to override this behavior
-  protected configure(
-    config: AnyConfigurationModel,
-    getSubAdapter?: getSubAdapterType,
-  ) {
-    const bamLocation = readConfObject(config, 'bamLocation')
-    const location = readConfObject(config, ['index', 'location'])
-    const indexType = readConfObject(config, ['index', 'indexType'])
-    const chunkSizeLimit = readConfObject(config, 'chunkSizeLimit')
-    const fetchSizeLimit = readConfObject(config, 'fetchSizeLimit')
-    this.bam = new BamFile({
-      bamFilehandle: openLocation(bamLocation),
-      csiFilehandle: indexType === 'CSI' ? openLocation(location) : undefined,
-      baiFilehandle: indexType !== 'CSI' ? openLocation(location) : undefined,
-      chunkSizeLimit,
-      fetchSizeLimit,
-    })
+  protected async configure() {
+    if (!this.cache) {
+      this.cache = await import('@gmod/bam').then(({ BamFile }) => {
+        const bamLocation = readConfObject(this.config, 'bamLocation')
+        const location = readConfObject(this.config, ['index', 'location'])
+        const indexType = readConfObject(this.config, ['index', 'indexType'])
+        const chunkSizeLimit = readConfObject(this.config, 'chunkSizeLimit')
+        const fetchSizeLimit = readConfObject(this.config, 'fetchSizeLimit')
+        const bam = new BamFile({
+          bamFilehandle: openLocation(bamLocation),
+          csiFilehandle:
+            indexType === 'CSI' ? openLocation(location) : undefined,
+          baiFilehandle:
+            indexType !== 'CSI' ? openLocation(location) : undefined,
+          chunkSizeLimit,
+          fetchSizeLimit,
+        })
 
-    const adapterConfig = readConfObject(config, 'sequenceAdapter')
-    if (adapterConfig && getSubAdapter) {
-      const { dataAdapter } = getSubAdapter(adapterConfig)
-      this.sequenceAdapter = dataAdapter as BaseFeatureDataAdapter
+        const adapterConfig = readConfObject(this.config, 'sequenceAdapter')
+        if (adapterConfig && this.getSubAdapter) {
+          const { dataAdapter } = this.getSubAdapter(adapterConfig)
+          const sequenceAdapter = dataAdapter as BaseFeatureDataAdapter
+          return { sequenceAdapter, bam }
+        }
+        return { bam }
+      })
     }
+    return this.cache
   }
 
   async getHeader(opts?: BaseOptions) {
-    return this.bam.getHeaderText(opts)
+    const { bam } = await this.setup(opts)
+    return bam.getHeaderText(opts)
   }
 
   private async setup(opts?: BaseOptions) {
     const { statusCallback = () => {} } = opts || {}
-    if (Object.keys(this.samHeader).length === 0) {
+    if (!this.setupCache) {
       statusCallback('Downloading index')
-      const samHeader = await this.bam.getHeader(opts)
+      const { bam } = await this.configure()
+      const samHeader = await bam.getHeader(opts)
 
       // use the @SQ lines in the header to figure out the
       // mapping between ref ref ID numbers and names
@@ -99,6 +110,7 @@ export default class BamAdapter extends BaseFeatureDataAdapter {
       }
       statusCallback('')
     }
+    return this.setupCache
   }
 
   async getRefNames(opts?: BaseOptions) {
@@ -156,14 +168,10 @@ export default class BamAdapter extends BaseFeatureDataAdapter {
     const { refName, start, end, originalRefName } = region
     const { signal, statusCallback = () => {} } = opts || {}
     return ObservableCreate<Feature>(async observer => {
-      await this.setup(opts)
+      const { bam } = await this.configure()
+      await this.setup()
       statusCallback('Downloading alignments')
-      const records = await this.bam.getRecordsForRange(
-        refName,
-        start,
-        end,
-        opts,
-      )
+      const records = await bam.getRecordsForRange(refName, start, end, opts)
       checkAbortSignal(signal)
 
       for (const record of records) {

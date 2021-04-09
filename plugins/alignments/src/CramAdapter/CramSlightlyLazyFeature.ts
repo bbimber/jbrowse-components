@@ -142,7 +142,7 @@ export default class CramSlightlyLazyFeature implements Feature {
       // @ts-ignore
       this.record.readFeatures.forEach(({ code, refPos, sub, data }) => {
         sublen = refPos - last_pos
-        seq += ref.substring(last_pos - refStart, refPos - refStart)
+        seq += ref?.substring(last_pos - refStart, refPos - refStart)
         last_pos = refPos
 
         if (oplen && op !== 'M') {
@@ -205,7 +205,7 @@ export default class CramSlightlyLazyFeature implements Feature {
     }
     if (seq.length !== this.record.readLength) {
       sublen = this.record.readLength - seq.length
-      seq += ref.substring(last_pos - refStart, last_pos - refStart + sublen)
+      seq += ref?.substring(last_pos - refStart, last_pos - refStart + sublen)
 
       if (oplen && op !== 'M') {
         cigar += oplen + op
